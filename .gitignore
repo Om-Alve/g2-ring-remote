@@ -1,0 +1,7 @@
+build/
+launcher/build/
+*.keystore
+*.jks
+*.log
+!test/fixtures/*.log
+.DS_Store

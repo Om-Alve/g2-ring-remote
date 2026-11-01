@@ -1,0 +1,187 @@
+package io.github.omalve.g2ringremote;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+/** {@code key=value} settings; see g2-ring-remote.conf for every key and its default. */
+final class Config {
+    static final List<String> GESTURES = Collections.unmodifiableList(Arrays.asList(
+            "click", "double-click", "long-press", "short-then-long-press",
+            "scroll-up", "scroll-down", "swipe-up", "swipe-down", "swipe-left", "swipe-right"));
+    static final String NONE = "none";
+
+    String matchName = "K02";
+    String matchUniq = "";
+    String host = "127.0.0.1";
+    int port = 8791;
+    String source = "watch";
+    String tokenFile = "/data/local/tmp/g2-ring-remote/token";
+    int tapThreshold = 100;
+    long repeatWindowMs = 600;
+    /** Deepgram speech-to-text for Faceclaw's "Whisper server" provider; see SttProxy. */
+    boolean sttEnabled = true;
+    int sttPort = 8004;
+    String sttKeyFile = "/data/local/tmp/g2-ring-remote/deepgram-key";
+    String sttModel = "nova-3";
+    /** Used when Faceclaw sends no language; "multi" is Deepgram's multilingual mode. */
+    String sttLanguage = "en";
+    /** If set, requests must send "Authorization: Bearer <this>" (Faceclaw's Whisper server API key). */
+    String sttLocalKey = "";
+    String sttEndpoint = "https://api.deepgram.com/v1/listen";
+    /** Event name (touch.up, key.PLAYPAUSE, ...) to gesture or "none". */
+    final Map<String, String> map = new LinkedHashMap<>();
+
+    Config() {
+        // Faceclaw's watch scheme: swipes navigate (outside spatial screens, right
+        // selects and left goes back), a tap selects. The center hold is
+        // double-click because only a double-click wakes a sleeping or locked display.
+        // The K02 scripts each D-pad swipe opposite to the button, TikTok style
+        // (the down button drags the finger up), so the finger direction is inverted.
+        // Verified on the ring on 2026-11-01.
+        map.put("touch.up", "swipe-down");
+        map.put("touch.down", "swipe-up");
+        map.put("touch.left", "swipe-right");
+        map.put("touch.right", "swipe-left");
+        map.put("touch.tap", "click");
+        map.put("key.PLAYPAUSE", "double-click");
+        map.put("key.NEXTSONG", "long-press");
+        map.put("key.PREVIOUSSONG", "short-then-long-press");
+        map.put("key.VOLUMEUP", "scroll-up");
+        map.put("key.VOLUMEDOWN", "scroll-down");
+    }
+
+    static Config load(File file) throws IOException {
+        return parse(Files.readAllLines(file.toPath(), StandardCharsets.UTF_8));
+    }
+
+    static Config parse(List<String> lines) {
+        Config c = new Config();
+        int number = 0;
+        for (String raw : lines) {
+            number++;
+            String line = raw.trim();
+            if (line.isEmpty() || line.startsWith("#")) {
+                continue;
+            }
+            int eq = line.indexOf('=');
+            if (eq <= 0) {
+                throw new IllegalArgumentException("line " + number + ": expected key=value");
+            }
+            String key = line.substring(0, eq).trim();
+            String value = line.substring(eq + 1).trim();
+            try {
+                c.set(key, value);
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException("line " + number + ": " + e.getMessage());
+            }
+        }
+        return c;
+    }
+
+    private void set(String key, String value) {
+        if (key.startsWith("map.")) {
+            String event = key.substring(4);
+            if (!event.startsWith("touch.") && !event.startsWith("key.")) {
+                throw new IllegalArgumentException("map events start with touch. or key.: " + key);
+            }
+            if (!value.equals(NONE) && !GESTURES.contains(value)) {
+                throw new IllegalArgumentException("unknown gesture '" + value + "' for " + key);
+            }
+            map.put(event, value);
+            return;
+        }
+        switch (key) {
+            case "match.name":
+                if (value.isEmpty()) {
+                    throw new IllegalArgumentException("match.name must not be empty");
+                }
+                matchName = value;
+                break;
+            case "match.uniq":
+                matchUniq = value;
+                break;
+            case "faceclaw.host":
+                host = value;
+                break;
+            case "faceclaw.port":
+                port = parseInt(key, value, 1, 65535);
+                break;
+            case "faceclaw.source":
+                if (!value.equals("watch") && !value.equals("ring")) {
+                    throw new IllegalArgumentException("faceclaw.source is watch or ring");
+                }
+                source = value;
+                break;
+            case "token.file":
+                tokenFile = value;
+                break;
+            case "touch.tap-threshold":
+                tapThreshold = parseInt(key, value, 1, 100000);
+                break;
+            case "key.repeat-window-ms":
+                repeatWindowMs = parseInt(key, value, 0, 60000);
+                break;
+            case "stt.enabled":
+                if (!value.equals("true") && !value.equals("false")) {
+                    throw new IllegalArgumentException("stt.enabled is true or false");
+                }
+                sttEnabled = value.equals("true");
+                break;
+            case "stt.port":
+                sttPort = parseInt(key, value, 1024, 65535);
+                break;
+            case "stt.key-file":
+                sttKeyFile = value;
+                break;
+            case "stt.model":
+                if (value.isEmpty()) {
+                    throw new IllegalArgumentException("stt.model must not be empty");
+                }
+                sttModel = value;
+                break;
+            case "stt.language":
+                sttLanguage = value;
+                break;
+            case "stt.local-key":
+                sttLocalKey = value;
+                break;
+            case "stt.endpoint":
+                if (!value.startsWith("https://") && !value.startsWith("http://127.0.0.1")) {
+                    throw new IllegalArgumentException("stt.endpoint must be https://");
+                }
+                sttEndpoint = value;
+                break;
+            default:
+                throw new IllegalArgumentException("unknown setting " + key);
+        }
+    }
+
+    private static int parseInt(String key, String value, int min, int max) {
+        try {
+            int n = Integer.parseInt(value);
+            if (n < min || n > max) {
+                throw new NumberFormatException();
+            }
+            return n;
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(key + " must be an integer in " + min + ".." + max);
+        }
+    }
+
+    /** "K02" matches "K02" and "K02 Consumer Control"; match.uniq, if set, must equal the device id. */
+    boolean matches(String name, String uniq) {
+        if (name == null) {
+            return false;
+        }
+        boolean nameOk = name.equals(matchName) || name.startsWith(matchName + " ");
+        boolean uniqOk = matchUniq.isEmpty() || matchUniq.equalsIgnoreCase(uniq == null ? "" : uniq);
+        return nameOk && uniqOk;
+    }
+}

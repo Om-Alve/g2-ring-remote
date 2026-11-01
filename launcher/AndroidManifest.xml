@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="io.github.omalve.g2ringremote.launcher">
+
+    <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
+
+    <application
+        android:name=".LauncherApp"
+        android:label="G2 Ring Remote"
+        android:allowBackup="false">
+
+        <meta-data
+            android:name="moe.shizuku.client.V3_SUPPORT"
+            android:value="true" />
+
+        <!-- Shizuku's server calls this when it starts, which also starts this
+             app's process: that is the hook for starting g2-ring-remote after a reboot. -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="io.github.omalve.g2ringremote.launcher.shizuku"
+            android:multiprocess="false"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
