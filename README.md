@@ -4,6 +4,10 @@ Use a cheap Bluetooth "TikTok remote" ring (the **K02**) as a remote control for
 Even Realities G2 glasses, through [Faceclaw](https://github.com/jimrandomh/faceclaw),
 the unofficial Android app for the G2. **No root needed.**
 
+**Demo:** [watch it in action on X](https://x.com/alve_om/status/2116800999570678031)
+
+**The ring:** [K02 Bluetooth remote ring on Amazon India](https://amzn.in/d/0g2CrdIc)
+
 g2-ring-remote is a small background process that takes exclusive control of the ring's
 input devices and turns its presses into Faceclaw gestures. It runs as the adb shell
 user, and can be restarted after a reboot without a computer through
@@ -14,7 +18,7 @@ K02 ──BLE HID──▶ Android Bluetooth ──▶ /dev/input/eventN
                                           │  EVIOCGRAB (exclusive)
                                           ▼
                                      g2-ring-remote ──▶ 127.0.0.1:8791 ──▶ Faceclaw ──▶ G2
-                                                   (Faceclaw's input API)
+                                                        (Faceclaw's input API)
 ```
 
 While g2-ring-remote holds the grab, the kernel delivers the ring's events **only** to
@@ -38,8 +42,9 @@ g2-ring-remote, or a reboot, releases the grab and the ring behaves normally aga
   [USB or wireless debugging](https://developer.android.com/tools/adb) enabled.
 - **Faceclaw** installed and paired with your G2, with its **input API** enabled (see
   [Faceclaw input token](#faceclaw-input-token)).
-- A **K02** Bluetooth ring paired with the phone. Other HID remotes can work with a
-  config change; see [Other rings](#other-rings).
+- A **K02** Bluetooth ring ([the one used here](https://amzn.in/d/0g2CrdIc)) paired
+  with the phone. Other HID remotes can work with a config change; see
+  [Other rings](#other-rings).
 - To build: a JDK (17 or 21) and the Android SDK with platform 35 and build-tools. The
   scripts find them through `ANDROID_HOME` and `JAVA_HOME`; see `env.sh`. No Gradle.
 - Optional, for restarting after a reboot without a computer:
