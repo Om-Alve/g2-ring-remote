@@ -14,7 +14,8 @@ import java.util.Map;
 final class Config {
     static final List<String> GESTURES = Collections.unmodifiableList(Arrays.asList(
             "click", "double-click", "long-press", "short-then-long-press",
-            "scroll-up", "scroll-down", "swipe-up", "swipe-down", "swipe-left", "swipe-right"));
+            "scroll-up", "scroll-down", "swipe-up", "swipe-down", "swipe-left", "swipe-right",
+            "voice-toggle"));
     static final String NONE = "none";
 
     String matchName = "K02";
@@ -53,7 +54,7 @@ final class Config {
         map.put("key.PLAYPAUSE", "double-click");
         map.put("key.NEXTSONG", "long-press");
         map.put("key.PREVIOUSSONG", "short-then-long-press");
-        map.put("key.VOLUMEUP", "scroll-up");
+        map.put("key.VOLUMEUP", "voice-toggle");
         map.put("key.VOLUMEDOWN", "scroll-down");
     }
 

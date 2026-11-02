@@ -61,11 +61,16 @@ Tested on a Nothing Phone (2a) with Android 15 and SELinux enforcing.
 | Center hold | `KEY_PLAYPAUSE` | `double-click` (back; wakes a sleeping or locked display) |
 | Hold that sends `KEY_NEXTSONG` | key | `long-press` (system menu) |
 | Hold that sends `KEY_PREVIOUSSONG` | key | `short-then-long-press` (app menu) |
-| Hold that sends `KEY_VOLUMEUP` / `KEY_VOLUMEDOWN` | key, repeats while held | `scroll-up` / `scroll-down` |
+| Camera button tap | `KEY_VOLUMEUP` | start voice input; tap again to stop |
+| Hold that sends `KEY_VOLUMEUP` | key, repeats while held | same voice toggle; repeats are ignored |
+| Hold that sends `KEY_VOLUMEDOWN` | key, repeats while held | `scroll-down` |
 
 Swipes use Faceclaw's watch scheme. In grids and menus they move spatially. Elsewhere, up
 and down scroll, right selects, and left goes back. A held key other than a scroll fires
-once per hold.
+once per hold. The camera button and the held up direction both send `KEY_VOLUMEUP`,
+so this mapping replaces held scroll-up. Short up presses still navigate. After the
+second camera tap, select Send in the voice dialog to deliver the transcript.
+The voice toggle requires a Faceclaw build that accepts the `voice-toggle` input gesture.
 
 In the log and in `g2-ring-remote.conf`, `touch.*` names the direction the **finger** travels
 in the ring's scripted swipe. The K02 drags the finger opposite to the button, so the

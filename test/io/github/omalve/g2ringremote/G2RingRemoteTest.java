@@ -33,6 +33,7 @@ public final class G2RingRemoteTest {
         recordedKeysMapToGestures();
         heldDiscreteKeyFiresOnce();
         heldScrollKeyRepeats();
+        cameraTapTogglesOncePerHold();
         keyUpAndAutorepeatAreIgnored();
         unmappedAndDisabledEventsSendNothing();
         configOverridesAndValidation();
@@ -148,6 +149,7 @@ public final class G2RingRemoteTest {
         equal("click", m.get("touch.tap"), "touch.tap");
         equal("double-click", m.get("key.PLAYPAUSE"), "center hold wakes / goes back");
         equal("long-press", m.get("key.NEXTSONG"), "system menu");
+        equal("voice-toggle", m.get("key.VOLUMEUP"), "camera shutter toggles voice capture");
         for (String gesture : m.values()) {
             check(Config.GESTURES.contains(gesture), "default gesture is valid: " + gesture);
         }
@@ -161,8 +163,8 @@ public final class G2RingRemoteTest {
             router.onEvent("/dev/input/event7", e[0], e[1], e[2], t);
             t += 1000; // spaced out: no repeat filtering
         }
-        equal(Arrays.asList("scroll-up", "scroll-up", "long-press", "scroll-down", "scroll-down",
-                "short-then-long-press", "scroll-up"), r.gestures, "recorded K02 keys");
+        equal(Arrays.asList("voice-toggle", "voice-toggle", "long-press", "scroll-down", "scroll-down",
+                "short-then-long-press", "voice-toggle"), r.gestures, "recorded K02 keys");
     }
 
     private static void heldDiscreteKeyFiresOnce() {
@@ -179,10 +181,22 @@ public final class G2RingRemoteTest {
     private static void heldScrollKeyRepeats() {
         Recorder r = new Recorder();
         Router router = new Router(new Config(), r);
+        router.onEvent("k", 1, 114, 1, 0);
+        router.onEvent("k", 1, 114, 1, 390);
+        router.onEvent("k", 1, 114, 1, 780);
+        equal(3, r.gestures.size(), "held VOLUMEDOWN keeps scrolling");
+    }
+
+    private static void cameraTapTogglesOncePerHold() {
+        Recorder r = new Recorder();
+        Router router = new Router(new Config(), r);
         router.onEvent("k", 1, 115, 1, 0);
+        router.onEvent("k", 1, 115, 0, 19);
         router.onEvent("k", 1, 115, 1, 390);
-        router.onEvent("k", 1, 115, 1, 780);
-        equal(3, r.gestures.size(), "held VOLUMEUP keeps scrolling");
+        router.onEvent("k", 1, 115, 0, 409);
+        router.onEvent("k", 1, 115, 1, 1200);
+        equal(Arrays.asList("voice-toggle", "voice-toggle"), r.gestures,
+                "camera hold repeats are ignored; next tap toggles speech off");
     }
 
     private static void keyUpAndAutorepeatAreIgnored() {
