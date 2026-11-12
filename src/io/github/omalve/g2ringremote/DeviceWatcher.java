@@ -47,12 +47,14 @@ final class DeviceWatcher {
         final String path;
         final String name;
         final String uniq;
+        final Config.Profile profile;
         final FileDescriptor fd;
 
-        Node(String path, String name, String uniq, FileDescriptor fd) {
+        Node(String path, String name, String uniq, Config.Profile profile, FileDescriptor fd) {
             this.path = path;
             this.name = name;
             this.uniq = uniq;
+            this.profile = profile;
             this.fd = fd;
         }
     }
@@ -143,11 +145,14 @@ final class DeviceWatcher {
         }
         Matcher uniqMatch = UNIQ.matcher(info);
         String uniq = uniqMatch.find() ? uniqMatch.group(1) : "";
-        if (!config.matches(name.group(1), uniq)) {
+        List<Config.Profile> matches = config.matching(name.group(1), uniq);
+        if (matches.isEmpty()) {
             ignored.add(path);
             return;
         }
-        grab(path, name.group(1), uniq);
+        Config.Profile profile = matches.get(0);
+        String alsoMatched = matches.size() > 1 ? matches.get(1).name : null;
+        grab(path, name.group(1), uniq, profile, alsoMatched);
     }
 
     private static String identify(String path) {
@@ -174,7 +179,7 @@ final class DeviceWatcher {
         return "";
     }
 
-    private void grab(String path, String name, String uniq) {
+    private void grab(String path, String name, String uniq, Config.Profile profile, String alsoMatched) {
         FileDescriptor fd;
         try {
             fd = Os.open(path, OsConstants.O_RDONLY | OsConstants.O_CLOEXEC, 0);
@@ -200,9 +205,12 @@ final class DeviceWatcher {
             return;
         }
         grabErrors.remove(path);
-        final Node node = new Node(path, name, uniq, fd);
+        final Node node = new Node(path, name, uniq, profile, fd);
         grabbed.put(path, node);
-        Log.i("grabbed " + path + " \"" + name + "\" " + uniq);
+        Log.i("grabbed " + path + " \"" + name + "\" " + uniq + " (profile " + profile.name + ")");
+        if (alsoMatched != null) {
+            Log.i(path + " also matches profile " + alsoMatched + "; using " + profile.name);
+        }
         Thread reader = new Thread(() -> read(node), "read-" + path.substring(INPUT_DIR.length() + 1));
         reader.setDaemon(true);
         reader.start();
@@ -221,7 +229,7 @@ final class DeviceWatcher {
                     int type = bb.getShort(base) & 0xffff;
                     int code = bb.getShort(base + 2) & 0xffff;
                     int value = bb.getInt(base + 4);
-                    router.onEvent(node.path, type, code, value, now);
+                    router.onEvent(node.path, node.profile, type, code, value, now);
                 }
             }
         } catch (IOException e) {

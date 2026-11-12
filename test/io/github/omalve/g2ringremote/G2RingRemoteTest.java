@@ -39,6 +39,16 @@ public final class G2RingRemoteTest {
         configOverridesAndValidation();
         shippedConfigMatchesDefaults();
         deviceNameMatching();
+        profilesParseAndInherit();
+        profileMapStartsEmpty();
+        profilesMatchInDefinitionOrder();
+        rejectsBadDeviceSettings();
+        routesEachNodeThroughItsProfile();
+        repeatFilteringIsPerProfile();
+        watchChordsBecomeSwipes();
+        passthroughParsingAndInjection();
+        passthroughRepeatsAreDropped();
+        simulateAcceptsProfileQualifiedEvents();
         keyNames();
         senderSendsOneRequestAndParsesReplies();
         senderNeverRetries();
@@ -132,15 +142,17 @@ public final class G2RingRemoteTest {
 
     private static final class Recorder implements Router.GestureSink {
         final List<String> gestures = new ArrayList<>();
+        final List<String> sources = new ArrayList<>();
 
         @Override
-        public void deliver(String event, String gesture) {
+        public void deliver(String event, String gesture, String source) {
             gestures.add(gesture);
+            sources.add(source);
         }
     }
 
     private static void defaultMappingFollowsFaceclawWatchScheme() {
-        Map<String, String> m = new Config().map;
+        Map<String, String> m = new Config().defaultProfile().map;
         // The K02's D-pad drags the finger opposite to the button.
         equal("swipe-down", m.get("touch.up"), "touch.up");
         equal("swipe-up", m.get("touch.down"), "touch.down");
@@ -224,13 +236,13 @@ public final class G2RingRemoteTest {
                 "# comment", "", "match.name = MyRing", "match.uniq=AA:BB:CC:DD:EE:FF",
                 "faceclaw.port=9000", "map.touch.up=scroll-up", "map.key.ZOOMIN=click",
                 "key.repeat-window-ms=0", "touch.tap-threshold=50"));
-        equal("MyRing", c.matchName, "match.name");
+        equal("MyRing", c.defaultProfile().matchName, "match.name");
         equal(9000, c.port, "faceclaw.port");
-        equal("scroll-up", c.map.get("touch.up"), "override");
-        equal("click", c.map.get("key.ZOOMIN"), "new key mapping");
-        equal("swipe-up", c.map.get("touch.down"), "untouched default");
-        equal(0L, c.repeatWindowMs, "repeat window");
-        equal(50, c.tapThreshold, "tap threshold");
+        equal("scroll-up", c.defaultProfile().map.get("touch.up"), "override");
+        equal("click", c.defaultProfile().map.get("key.ZOOMIN"), "new key mapping");
+        equal("swipe-up", c.defaultProfile().map.get("touch.down"), "untouched default");
+        equal(0L, c.defaultProfile().repeatWindowMs, "repeat window");
+        equal(50, c.defaultProfile().tapThreshold, "tap threshold");
         rejects("map.touch.up=jump", "unknown gesture");
         rejects("map.foo=click", "map event prefix");
         rejects("faceclaw.port=0", "port range");
@@ -242,10 +254,15 @@ public final class G2RingRemoteTest {
     private static void shippedConfigMatchesDefaults() throws Exception {
         Config shipped = Config.load(new File(fixtures, "../../g2-ring-remote.conf"));
         Config defaults = new Config();
-        equal(defaults.map, shipped.map, "g2-ring-remote.conf mapping equals the built-in defaults");
-        equal(defaults.matchName, shipped.matchName, "g2-ring-remote.conf match.name");
+        equal(defaults.defaultProfile().map, shipped.defaultProfile().map,
+                "g2-ring-remote.conf mapping equals the built-in defaults");
+        equal(defaults.defaultProfile().matchName, shipped.defaultProfile().matchName,
+                "g2-ring-remote.conf match.name");
         equal(defaults.tokenFile, shipped.tokenFile, "g2-ring-remote.conf token.file");
-        equal(defaults.repeatWindowMs, shipped.repeatWindowMs, "g2-ring-remote.conf repeat window");
+        equal(defaults.defaultProfile().repeatWindowMs, shipped.defaultProfile().repeatWindowMs,
+                "g2-ring-remote.conf repeat window");
+        equal(1, shipped.profiles().size(), "an existing config defines only the default profile");
+        equal(Arrays.asList("default"), profileNames(shipped), "no device profile is enabled by default");
     }
 
     private static void rejects(String line, String what) {
@@ -261,14 +278,220 @@ public final class G2RingRemoteTest {
 
     private static void deviceNameMatching() {
         Config c = new Config();
-        check(c.matches("K02", ""), "K02");
-        check(c.matches("K02 Consumer Control", "x"), "K02 Consumer Control");
-        check(!c.matches("K020", ""), "K020");
-        check(!c.matches("gpio-keys", ""), "gpio-keys");
-        check(!c.matches(null, ""), "null name");
+        check(c.defaultProfile().matches("K02", ""), "K02");
+        check(c.defaultProfile().matches("K02 Consumer Control", "x"), "K02 Consumer Control");
+        check(!c.defaultProfile().matches("K020", ""), "K020");
+        check(!c.defaultProfile().matches("gpio-keys", ""), "gpio-keys");
+        check(!c.defaultProfile().matches(null, ""), "null name");
         Config pinned = Config.parse(Collections.singletonList("match.uniq=AA:BB:CC:DD:EE:FF"));
-        check(pinned.matches("K02", "aa:bb:cc:dd:ee:ff"), "uniq is case-insensitive");
-        check(!pinned.matches("K02", "00:11:22:33:44:55"), "another K02");
+        check(pinned.defaultProfile().matches("K02", "aa:bb:cc:dd:ee:ff"), "uniq is case-insensitive");
+        check(!pinned.defaultProfile().matches("K02", "00:11:22:33:44:55"), "another K02");
+    }
+
+    // --- device profiles ----------------------------------------------------------
+
+    private static final String WATCH_NAME = "CMF Watch Pro 2";
+
+    private static Config twoRemotes() {
+        return Config.parse(Arrays.asList(
+                // Device lines before the top-level ones: inheritance still uses the
+                // final top-level values.
+                "device.watch.match.name=" + WATCH_NAME,
+                "device.watch.map.key.PLAYPAUSE=click",
+                "device.watch.map.key.MUTE=voice-toggle",
+                "device.watch.map.touch.tap=long-press",
+                "match.name=K02",
+                "faceclaw.source=ring",
+                "key.repeat-window-ms=600",
+                "touch.tap-threshold=80",
+                "device.watch.faceclaw.source=watch",
+                "device.watch.key.repeat-window-ms=150"));
+    }
+
+    private static void profilesParseAndInherit() {
+        Config c = twoRemotes();
+        Config.Profile ring = c.defaultProfile();
+        Config.Profile watch = c.profile("watch");
+        check(watch != null, "device.watch parses");
+        equal(Arrays.asList("default", "watch"), profileNames(c), "default profile comes first");
+        equal("K02", ring.matchName, "ring match.name");
+        equal(WATCH_NAME, watch.matchName, "watch match.name");
+        equal("", watch.matchUniq, "watch inherits an unset match.uniq");
+        equal(150L, watch.repeatWindowMs, "watch repeat window");
+        equal(600L, ring.repeatWindowMs, "ring repeat window is untouched");
+        equal("watch", watch.source, "watch faceclaw.source");
+        equal("ring", ring.source, "ring faceclaw.source");
+        equal(80, watch.tapThreshold, "watch inherits the tap threshold");
+        equal(80, ring.tapThreshold, "ring tap threshold");
+    }
+
+    private static void profileMapStartsEmpty() {
+        Config c = twoRemotes();
+        Config.Profile watch = c.profile("watch");
+        equal(3, watch.map.size(), "only the device's own map lines");
+        equal("click", watch.map.get("key.PLAYPAUSE"), "watch PLAYPAUSE");
+        equal(null, watch.map.get("key.NEXTSONG"), "the default map is not inherited");
+        equal(null, watch.map.get("touch.up"), "no inherited ring swipes");
+        equal("double-click", c.defaultProfile().map.get("key.PLAYPAUSE"), "ring map unchanged");
+        equal(null, c.defaultProfile().map.get("key.MUTE"), "the watch map does not leak into the ring");
+    }
+
+    private static void profilesMatchInDefinitionOrder() {
+        Config c = Config.parse(Arrays.asList(
+                "device.first.match.name=CMF",
+                "device.second.match.name=CMF Watch Pro 2"));
+        List<Config.Profile> matches = c.matching(WATCH_NAME, "");
+        equal(2, matches.size(), "both profiles match the name");
+        equal("first", matches.get(0).name, "first defined wins");
+        equal("first", c.matching(WATCH_NAME, "").get(0).name, "matching is ordered");
+        equal(0, c.matching("gpio-keys", "").size(), "unmatched node");
+    }
+
+    private static void rejectsBadDeviceSettings() {
+        rejects("device.watch.map.key.MUTE=android:VOLUME_DOWN", "android keycode format");
+        rejects("device.watch.map.key.MUTE=android:KEYCODE_volume_down", "lowercase keycode");
+        rejects("device.watch.map.key.MUTE=android:", "empty keycode");
+        rejects("device.watch.stt.port=9000", "global setting in a profile");
+        rejects("device.watch.unknown=1", "unknown profile setting");
+        rejects("device.default.match.name=K02", "reserved profile name");
+        rejects("device..match.name=K02", "empty profile name");
+        rejects("device.watch=CMF Watch Pro 2", "missing setting");
+        rejects("device.watch.key.repeat-window-ms=later", "profile integer");
+    }
+
+    private static void routesEachNodeThroughItsProfile() {
+        Config c = twoRemotes();
+        Recorder r = new Recorder();
+        Router router = new Router(c, r);
+        Config.Profile ring = c.defaultProfile();
+        Config.Profile watch = c.profile("watch");
+        router.onEvent("/dev/input/event7", ring, 1, 164, 1, 0);
+        router.onEvent("/dev/input/event9", watch, 1, 164, 1, 0);
+        equal(Arrays.asList("double-click", "click"), r.gestures, "the same key through two profiles");
+        equal(Arrays.asList("ring", "watch"), r.sources, "each profile's faceclaw source");
+        tap(router, "/dev/input/event7", ring, 500, 400);
+        tap(router, "/dev/input/event9", watch, 500, 400);
+        equal(Arrays.asList("double-click", "click", "click", "long-press"), r.gestures,
+                "touch decoding uses each profile's map");
+        tap(router, "/dev/input/event9", watch, 900, 400);
+        equal("long-press", r.gestures.get(r.gestures.size() - 1), "a second watch tap still uses its map");
+    }
+
+    private static void watchChordsBecomeSwipes() {
+        Config c = Config.parse(Arrays.asList(
+                "device.watch.match.name=" + WATCH_NAME,
+                "device.watch.key.repeat-window-ms=150",
+                "device.watch.map.key.VOLUMEUP=scroll-up",
+                "device.watch.map.key.CODE_0x195=scroll-down",
+                "device.watch.map.key.PLAYPAUSE=click",
+                "device.watch.map.key.CODE_0x195+VOLUMEUP=swipe-up",
+                "device.watch.map.key.CODE_0x195+MUTE=swipe-down",
+                "device.watch.map.key.CODE_0x195+PREVIOUSSONG=swipe-left",
+                "device.watch.map.key.CODE_0x195+NEXTSONG=swipe-right"));
+        Config.Profile watch = c.profile("watch");
+        Recorder r = new Recorder();
+        Router router = new Router(c, r);
+        int[][] reports = {
+                {115}, {0x195}, {164},                 // single keys still work
+                {115, 0x195}, {113, 0x195}, {165, 0x195}, {163, 0x195}, // swipes (kernel order)
+        };
+        long t = 0;
+        for (int[] keys : reports) {
+            for (int k : keys) {
+                router.onEvent("/watch", watch, 4, 4, 0xc0000, t); // EV_MSC scan code: ignored
+                router.onEvent("/watch", watch, 1, k, 1, t);
+            }
+            router.onEvent("/watch", watch, 0, 0, 0, t);
+            for (int k : keys) {
+                router.onEvent("/watch", watch, 1, k, 0, t + 5);
+            }
+            router.onEvent("/watch", watch, 0, 0, 0, t + 5);
+            t += 1000;
+        }
+        equal(Arrays.asList("scroll-up", "scroll-down", "click",
+                "swipe-up", "swipe-down", "swipe-left", "swipe-right"), r.gestures, "watch keys and chords");
+        equal("key.CODE_0x195+NEXTSONG", Router.chordName(Arrays.asList(163, 0x195)), "chord name is sorted");
+
+        // A profile without chord mappings dispatches on the key down, without waiting for SYN.
+        Recorder plain = new Recorder();
+        Router ring = new Router(new Config(), plain);
+        ring.onEvent("k", 1, 164, 1, 0);
+        equal(1, plain.gestures.size(), "no chords: immediate");
+    }
+
+    private static void repeatFilteringIsPerProfile() {
+        Config c = twoRemotes();
+        Recorder r = new Recorder();
+        Router router = new Router(c, r);
+        Config.Profile ring = c.defaultProfile();
+        Config.Profile watch = c.profile("watch");
+        router.onEvent("/ring", ring, 1, 164, 1, 0);
+        router.onEvent("/ring", ring, 1, 164, 1, 390); // inside the ring's 600 ms window
+        router.onEvent("/watch", watch, 1, 164, 1, 0);
+        router.onEvent("/watch", watch, 1, 164, 1, 100); // inside the watch's 150 ms window
+        router.onEvent("/watch", watch, 1, 164, 1, 260); // quiet for 160 ms: fires
+        equal(Arrays.asList("double-click", "click", "click"), r.gestures,
+                "each profile keeps its own repeat window");
+        check(router.lastEvent().startsWith("watch key.PLAYPAUSE"), "the last event is profile-qualified");
+    }
+
+    private static void passthroughParsingAndInjection() throws Exception {
+        Config c = Config.parse(Arrays.asList(
+                "device.watch.match.name=" + WATCH_NAME,
+                "device.watch.map.key.VOLUMEDOWN=android:KEYCODE_VOLUME_DOWN"));
+        final List<String> commands = Collections.synchronizedList(new ArrayList<String>());
+        Recorder r = new Recorder();
+        Router router = new Router(c, r, argv -> {
+            commands.add(String.join(" ", argv));
+            return 0;
+        });
+        Config.Profile watch = c.profile("watch");
+        router.onEvent("/watch", watch, 1, 114, 1, 0);
+        waitFor(() -> !commands.isEmpty(), "input keyevent runs");
+        equal(Collections.singletonList("input keyevent KEYCODE_VOLUME_DOWN"), commands,
+                "the payload is exactly the configured key code");
+        equal(0, r.gestures.size(), "a passthrough never reaches Faceclaw");
+        equal("android:KEYCODE_VOLUME_DOWN", router.simulate(watch, "key.VOLUMEDOWN"),
+                "simulate reports the passthrough");
+    }
+
+    private static void passthroughRepeatsAreDropped() throws Exception {
+        Config c = Config.parse(Arrays.asList(
+                "device.watch.match.name=" + WATCH_NAME,
+                "device.watch.key.repeat-window-ms=150",
+                "device.watch.map.key.VOLUMEDOWN=android:KEYCODE_VOLUME_DOWN"));
+        final List<String> commands = Collections.synchronizedList(new ArrayList<String>());
+        Router router = new Router(c, new Recorder(), argv -> {
+            commands.add(String.join(" ", argv));
+            return 0;
+        });
+        Config.Profile watch = c.profile("watch");
+        router.onEvent("/watch", watch, 1, 114, 1, 0);
+        router.onEvent("/watch", watch, 1, 114, 1, 100);
+        check(router.lastEvent().contains("repeat ignored"), "the second press is filtered");
+        waitFor(() -> commands.size() >= 1, "the first press is injected");
+        Thread.sleep(100);
+        equal(1, commands.size(), "one injection per hold");
+    }
+
+    private static void simulateAcceptsProfileQualifiedEvents() {
+        Config c = twoRemotes();
+        Recorder r = new Recorder();
+        Router router = new Router(c, r);
+        Config.Profile watch = c.profile("watch");
+        equal("voice-toggle", router.simulate(watch, "key.MUTE"), "profile simulate");
+        equal("click", router.simulate("touch.tap"), "the old single-argument form uses the default profile");
+        equal(null, router.simulate("key.MUTE"), "the watch map does not leak into the default simulate");
+        equal(null, router.simulate(watch, "touch.up"), "unmapped profile event");
+        equal(Arrays.asList("voice-toggle", "click"), r.gestures, "simulate delivers like a device event");
+    }
+
+    private static void tap(Router router, String node, Config.Profile profile, int x, int y) {
+        router.onEvent(node, profile, 3, TouchDecoder.ABS_X, x, 0);
+        router.onEvent(node, profile, 3, TouchDecoder.ABS_Y, y, 0);
+        router.onEvent(node, profile, 1, TouchDecoder.BTN_TOUCH, 1, 0);
+        router.onEvent(node, profile, 1, TouchDecoder.BTN_TOUCH, 0, 0);
+        router.onEvent(node, profile, 0, TouchDecoder.SYN_REPORT, 0, 0);
     }
 
     private static void keyNames() {
@@ -321,8 +544,8 @@ public final class G2RingRemoteTest {
             FaceclawSender sender = new FaceclawSender(senderConfig(server.getLocalPort(), "fc1_te\"st"));
             equal("unauthorized: Unknown token.", sender.ping(), "ping rejection");
             sender.start();
-            sender.deliver("touch.tap", "click");
-            sender.deliver("touch.left", "swipe-left");
+            sender.deliver("touch.tap", "click", "watch");
+            sender.deliver("touch.left", "swipe-left", "watch");
             fake.join(5000);
             waitFor(() -> sender.stats().startsWith("delivered 1, failed 1"), "stats settle");
         }
@@ -354,7 +577,7 @@ public final class G2RingRemoteTest {
             fake.start();
             FaceclawSender sender = new FaceclawSender(senderConfig(server.getLocalPort(), "fc1_x"));
             sender.start();
-            sender.deliver("key.PLAYPAUSE", "double-click");
+            sender.deliver("key.PLAYPAUSE", "double-click", "watch");
             fake.join(5000);
             waitFor(() -> sender.stats().startsWith("delivered 0, failed 1"), "failure recorded");
         }
@@ -367,6 +590,14 @@ public final class G2RingRemoteTest {
     }
 
     // --- helpers ------------------------------------------------------------------
+
+    private static List<String> profileNames(Config config) {
+        List<String> names = new ArrayList<>();
+        for (Config.Profile profile : config.profiles()) {
+            names.add(profile.name);
+        }
+        return names;
+    }
 
     private interface Condition {
         boolean holds();

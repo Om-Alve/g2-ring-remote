@@ -28,12 +28,22 @@ final class FaceclawSender implements Router.GestureSink {
     private static final Pattern MESSAGE = Pattern.compile("\"message\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
 
     private final Config config;
-    private final BlockingQueue<String> queue = new ArrayBlockingQueue<>(4);
+    private final BlockingQueue<Request> queue = new ArrayBlockingQueue<>(4);
     private final Object statsLock = new Object();
     private int delivered;
     private int failed;
     private int dropped;
     private String lastResult = "nothing sent yet";
+
+    private static final class Request {
+        final String gesture;
+        final String source;
+
+        Request(String gesture, String source) {
+            this.gesture = gesture;
+            this.source = source;
+        }
+    }
 
     FaceclawSender(Config config) {
         this.config = config;
@@ -46,8 +56,8 @@ final class FaceclawSender implements Router.GestureSink {
     }
 
     @Override
-    public void deliver(String event, String gesture) {
-        if (!queue.offer(gesture)) {
+    public void deliver(String event, String gesture, String source) {
+        if (!queue.offer(new Request(gesture, source))) {
             synchronized (statsLock) {
                 dropped++;
             }
@@ -76,9 +86,9 @@ final class FaceclawSender implements Router.GestureSink {
 
     private void drain() {
         while (true) {
-            String gesture;
+            Request item;
             try {
-                gesture = queue.take();
+                item = queue.take();
             } catch (InterruptedException e) {
                 return;
             }
@@ -87,8 +97,8 @@ final class FaceclawSender implements Router.GestureSink {
             try {
                 String token = readToken();
                 String reply = request("{\"version\":1,\"token\":\"" + escape(token)
-                        + "\",\"action\":\"input\",\"gesture\":\"" + gesture
-                        + "\",\"source\":\"" + config.source + "\"}");
+                        + "\",\"action\":\"input\",\"gesture\":\"" + item.gesture
+                        + "\",\"source\":\"" + item.source + "\"}");
                 ok = OK.matcher(reply).find();
                 result = describe(reply);
             } catch (IOException e) {
@@ -100,9 +110,9 @@ final class FaceclawSender implements Router.GestureSink {
                 } else {
                     failed++;
                 }
-                lastResult = gesture + " " + result;
+                lastResult = item.gesture + " " + result;
             }
-            Log.i("faceclaw " + gesture + ": " + result);
+            Log.i("faceclaw " + item.gesture + ": " + result);
         }
     }
 

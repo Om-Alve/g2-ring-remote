@@ -8,21 +8,22 @@ the unofficial Android app for the G2. **No root needed.**
 
 **The ring:** [K02 Bluetooth remote ring on Amazon India](https://amzn.in/d/0g2CrdIc)
 
-g2-ring-remote is a small background process that takes exclusive control of the ring's
-input devices and turns its presses into Faceclaw gestures. It runs as the adb shell
-user, and can be restarted after a reboot without a computer through
-[Shizuku](https://shizuku.rikka.app/).
+g2-ring-remote is a small background process that takes exclusive control of its remotes'
+input devices and turns their presses into Faceclaw gestures. It can grab several
+Bluetooth HID remotes at once — the K02 ring plus, say, a CMF Watch Pro 2 — each with its
+own key map. It runs as the adb shell user, and can be restarted after a reboot without a
+computer through [Shizuku](https://shizuku.rikka.app/).
 
 ```
-K02 ──BLE HID──▶ Android Bluetooth ──▶ /dev/input/eventN
-                                          │  EVIOCGRAB (exclusive)
-                                          ▼
-                                     g2-ring-remote ──▶ 127.0.0.1:8791 ──▶ Faceclaw ──▶ G2
-                                                        (Faceclaw's input API)
+K02, watch ──Bluetooth HID──▶ Android ──▶ /dev/input/eventN
+                                            │  EVIOCGRAB (exclusive)
+                                            ▼
+                              g2-ring-remote ──▶ 127.0.0.1:8791 ──▶ Faceclaw ──▶ G2
+                                              (Faceclaw's input API)
 ```
 
-While g2-ring-remote holds the grab, the kernel delivers the ring's events **only** to
-g2-ring-remote. Android's input pipeline receives nothing from the ring:
+While g2-ring-remote holds the grab, the kernel delivers the remotes' events **only** to
+g2-ring-remote. Android's input pipeline receives nothing from them:
 
 - no taps or scrolls on whatever is on the phone screen;
 - no volume changes, no music play/pause/skip;
@@ -30,8 +31,10 @@ g2-ring-remote. Android's input pipeline receives nothing from the ring:
 - it works with the phone locked and the screen off, whatever app is in front.
 
 The phone's own buttons, touchscreen and other Bluetooth devices are not affected. Only
-input nodes named `K02` or starting with `K02 ` are grabbed (configurable). Stopping
-g2-ring-remote, or a reboot, releases the grab and the ring behaves normally again.
+input nodes that match a configured device profile are grabbed: the default profile
+grabs nodes named `K02` or starting with `K02 `, and each `device.<name>.match.name`
+adds one more remote. Stopping g2-ring-remote, or a reboot, releases the grab and the
+remotes behave normally again.
 
 > Unofficial. Not affiliated with Even Realities, the Faceclaw authors, the ring's
 > manufacturer, or Shizuku. Use at your own risk.
@@ -43,8 +46,8 @@ g2-ring-remote, or a reboot, releases the grab and the ring behaves normally aga
 - **Faceclaw** installed and paired with your G2, with its **input API** enabled (see
   [Faceclaw input token](#faceclaw-input-token)).
 - A **K02** Bluetooth ring ([the one used here](https://amzn.in/d/0g2CrdIc)) paired
-  with the phone. Other HID remotes can work with a config change; see
-  [Other rings](#other-rings).
+  with the phone. Any other HID remote can be added as a device profile; see
+  [Other remotes](#other-remotes).
 - To build: a JDK (17 or 21) and the Android SDK with platform 35 and build-tools. The
   scripts find them through `ANDROID_HOME` and `JAVA_HOME`; see `env.sh`. No Gradle.
 - Optional, for restarting after a reboot without a computer:
@@ -78,6 +81,27 @@ default config maps each finger direction to its opposite (`touch.up=swipe-down`
 on). Holds are named after the key the ring sends. Watch `./g2-ring-remote.sh logs -f` while
 pressing a control, and remap in `g2-ring-remote.conf` if your ring differs.
 
+### A second remote: the CMF Watch Pro 2
+
+The watch appears as its own Classic Bluetooth HID device. A `device.watch.*` profile in
+`g2-ring-remote.conf` grabs it next to the ring; its map is separate from the ring's.
+
+| Watch | Arrives as | Faceclaw gesture |
+| --- | --- | --- |
+| Scroll up | `KEY_VOLUMEUP` | `scroll-up` |
+| Scroll down | `KEY_LAST` (`CODE_0x195`) | `scroll-down` |
+| Tap | `KEY_PLAYPAUSE` | `click` |
+| Double tap | `KEY_REWIND` (`CODE_0xa8`) | `double-click` |
+| Hold | `KEY_NEXTSONG` | `long-press` |
+| Hold, other side | `KEY_PREVIOUSSONG` | `short-then-long-press` |
+| Microphone | `KEY_MUTE` | `voice-toggle` |
+| Camera shutter | `KEY_VOLUMEDOWN` | `android:KEYCODE_VOLUME_DOWN` (back to Android) |
+
+The watch repeats nothing, so its profile drops repeats inside 150 ms instead of the
+ring's 600 ms. The camera shutter is re-injected into Android with `input keyevent`, so
+the phone's camera app still takes the photo while the watch is grabbed. See the
+commented example block in `g2-ring-remote.conf`.
+
 ## Install and run
 
 From this directory, with the phone connected over adb:
@@ -89,6 +113,7 @@ From this directory, with the phone connected over adb:
 ./g2-ring-remote.sh status                  # grabbed nodes, Faceclaw ping, delivery counts
 ./g2-ring-remote.sh logs -f                 # every press: decoded event, gesture, Faceclaw reply
 ./g2-ring-remote.sh simulate touch.tap      # send a mapped gesture without the ring
+./g2-ring-remote.sh simulate watch key.MUTE # the same, for a device profile
 ./g2-ring-remote.sh stop
 ```
 
@@ -186,38 +211,53 @@ server key**. Set `stt.enabled=false` to turn the proxy off.
 ./g2-ring-remote.sh restart
 ```
 
-### Other rings
+The top-level settings are the default device profile (the K02). `device.<name>.SETTING`
+adds another profile: `match.name`, `match.uniq`, `faceclaw.source`,
+`touch.tap-threshold`, `key.repeat-window-ms` and `map.*` can all be set per device. A
+profile's map starts empty, so it does not inherit the ring's map; every other setting
+falls back to the top-level value. A node is grabbed by the first profile that matches
+it. Profile names are one word.
+
+A map value of `android:KEYCODE_NAME` re-injects that key into Android with
+`input keyevent` instead of sending a Faceclaw gesture. For example,
+`device.watch.map.key.VOLUMEDOWN=android:KEYCODE_VOLUME_DOWN` keeps the watch's camera
+shutter working with the phone's camera app. The name must be `KEYCODE_` plus capital
+letters, digits and underscores.
+
+### Other remotes
 
 Any Bluetooth remote that shows up as an input device can work:
 
-1. Find its input node name with `adb shell getevent -i` and set `match.name`. To ignore
-   other devices with the same name, also set `match.uniq` to the remote's Bluetooth
-   address.
+1. Find its input node name with `adb shell getevent -i` and add a profile with
+   `device.<name>.match.name`. To ignore other devices with the same name, also set
+   `device.<name>.match.uniq` to the remote's Bluetooth address.
 2. Start g2-ring-remote and watch `./g2-ring-remote.sh logs -f` while pressing each control.
 3. Map what you see (`touch.*` for scripted touches, `key.*` for keys) to Faceclaw
-   gestures in `g2-ring-remote.conf`.
+   gestures or `android:KEYCODE_...` under `device.<name>.map.*`.
 
 ## How it works
 
 - `DeviceWatcher` watches `/dev/input` with inotify, plus a 5 s rescan. It identifies
-  each new node with `getevent -i`, because Java cannot issue `EVIOCGNAME`. It then opens
+  each new node with `getevent -i`, because Java cannot issue `EVIOCGNAME`. The first
+  profile that matches the node's name and uniq grabs it. It then opens
   the node and calls `EVIOCGRAB` through libcore's `ioctlInt`, which `app_process` can
-  reach. The ring's nodes disappear when it sleeps and come back on reconnect; they are
+  reach. Remotes' nodes disappear when they sleep and come back on reconnect; they are
   grabbed again within milliseconds.
 - `TouchDecoder` turns each scripted touch into a direction or a tap. The kernel drops
   unchanged ABS values, so a vertical swipe often reports no X. Positions carry across
-  touches for that reason.
-- `Router` maps events through `g2-ring-remote.conf` and drops repeats of held non-scroll
-  keys.
+  touches for that reason. Each node has its own decoder and repeat state.
+- `Router` maps events through the matched profile and drops repeats of held non-scroll
+  keys. A map value of `android:KEYCODE_...` goes back to Android through
+  `input keyevent` on its own thread, not to Faceclaw.
 - `FaceclawSender` sends one JSON request per connection over a bounded in-order queue.
   It never retries: a timed-out request may already have reached the glasses.
-- The abstract socket `g2-ring-remote` serves `status`, `stop` and `simulate`,
-  and prevents a second copy from starting.
+- The abstract socket `g2-ring-remote` serves `status`, `stop` and
+  `simulate [PROFILE] EVENT`, and prevents a second copy from starting.
 
 ## Tests
 
 ```sh
-./test.sh    # JVM only: the decoder replays recorded K02 captures; mapping, config, sender, STT proxy
+./test.sh    # JVM only: decoder, mapping, device profiles, passthrough, config, sender, STT proxy
 ./build.sh   # build/g2-ring-remote.dex
 ```
 

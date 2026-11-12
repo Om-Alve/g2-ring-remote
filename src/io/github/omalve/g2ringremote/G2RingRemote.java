@@ -14,11 +14,11 @@ import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
 /**
- * K02 ring -> Faceclaw, run as the adb shell user through app_process (no root):
+ * Bluetooth HID remotes -> Faceclaw, run as the adb shell user through app_process (no root):
  *
  * <pre>
  *   app_process /system/bin --nice-name=g2-ring-remote io.github.omalve.g2ringremote.G2RingRemote run [config]
- *   app_process /system/bin io.github.omalve.g2ringremote.G2RingRemote status|stop|simulate EVENT
+ *   app_process /system/bin io.github.omalve.g2ringremote.G2RingRemote status|stop|simulate [PROFILE] EVENT
  * </pre>
  *
  * The running instance owns the abstract socket {@value #SOCKET}, which also keeps
@@ -43,7 +43,7 @@ public final class G2RingRemote {
                     System.exit(control(String.join(" ", args)));
                     return;
                 default:
-                    System.err.println("usage: G2RingRemote run [config] | status | stop | simulate EVENT");
+                    System.err.println("usage: G2RingRemote run [config] | status | stop | simulate [PROFILE] EVENT");
                     System.exit(2);
             }
         } catch (Exception e) {
@@ -102,12 +102,19 @@ public final class G2RingRemote {
         }
 
         final long started = System.currentTimeMillis();
-        Log.i("g2-ring-remote starting (pid " + android.os.Process.myPid() + "), matching \"" + config.matchName + "\""
-                + (config.matchUniq.isEmpty() ? "" : " id " + config.matchUniq));
-        for (Map.Entry<String, String> e : config.map.entrySet()) {
-            Log.i("  map " + e.getKey() + " -> " + e.getValue());
+        Log.i("g2-ring-remote starting (pid " + android.os.Process.myPid() + "), matching "
+                + describe(config.defaultProfile()));
+        for (Config.Profile profile : config.profiles()) {
+            if (profile != config.defaultProfile()) {
+                Log.i("device " + profile.name + ": matching " + describe(profile)
+                        + ", faceclaw source " + profile.source);
+            }
+            for (Map.Entry<String, String> e : profile.map.entrySet()) {
+                Log.i("  map " + (profile == config.defaultProfile() ? "" : profile.name + ".")
+                        + e.getKey() + " -> " + e.getValue());
+            }
         }
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> Log.i("stopping; the ring returns to Android")));
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> Log.i("stopping; the input devices return to Android")));
 
         FaceclawSender sender = new FaceclawSender(config);
         sender.start();
@@ -143,27 +150,36 @@ public final class G2RingRemote {
                         long up = (System.currentTimeMillis() - started) / 1000;
                         out.println("running " + (up / 60) + "m" + (up % 60) + "s, pid " + android.os.Process.myPid());
                         if (watcher.grabbedNodes().isEmpty()) {
-                            out.println("grabbed: none (waiting for \"" + config.matchName + "\"; is the ring connected?)");
+                            out.println("grabbed: none (waiting for " + matchNames(config)
+                                    + "; is a remote connected?)");
                         }
                         for (DeviceWatcher.Node n : watcher.grabbedNodes()) {
-                            out.println("grabbed: " + n.path + " \"" + n.name + "\" " + n.uniq);
+                            out.println("grabbed: " + n.path + " \"" + n.name + "\" " + n.uniq
+                                    + " (profile " + n.profile.name + ")");
                         }
-                        out.println("last ring event: " + router.lastEvent());
+                        out.println("last event: " + router.lastEvent());
                         out.println("faceclaw " + config.host + ":" + config.port + " ping: " + sender.ping());
                         out.println("deliveries: " + sender.stats());
                         out.println("stt: " + (stt != null ? stt.status()
                                 : config.sttEnabled ? "not listening (see log)" : "off (stt.enabled=false)"));
                         break;
                     case "simulate":
-                        if (parts.length != 2) {
-                            out.println("usage: simulate EVENT   (e.g. touch.tap, key.PLAYPAUSE)");
+                        if (parts.length < 2 || parts.length > 3) {
+                            out.println("usage: simulate [PROFILE] EVENT   (e.g. touch.tap, watch key.MUTE)");
                             break;
                         }
-                        String gesture = router.simulate(parts[1]);
-                        out.println(parts[1] + (gesture == null ? " is unmapped" : " -> " + gesture + " (queued)"));
+                        Config.Profile profile = parts.length == 2 ? config.defaultProfile() : config.profile(parts[1]);
+                        String event = parts[parts.length - 1];
+                        if (profile == null) {
+                            out.println("unknown profile " + parts[1] + " (profiles: " + profileNames(config) + ")");
+                            break;
+                        }
+                        String gesture = router.simulate(profile, event);
+                        out.println((profile == config.defaultProfile() ? "" : profile.name + " ") + event
+                                + (gesture == null ? " is unmapped" : " -> " + gesture + " (queued)"));
                         break;
                     case "stop":
-                        out.println("stopping; the ring returns to Android");
+                        out.println("stopping; the input devices return to Android");
                         out.flush();
                         Log.i("stop requested");
                         System.exit(0);
@@ -175,5 +191,31 @@ public final class G2RingRemote {
                 Log.i("control connection error: " + e.getMessage());
             }
         }
+    }
+
+    private static String describe(Config.Profile profile) {
+        return "\"" + profile.matchName + "\"" + (profile.matchUniq.isEmpty() ? "" : " id " + profile.matchUniq);
+    }
+
+    private static String matchNames(Config config) {
+        StringBuilder names = new StringBuilder();
+        for (Config.Profile profile : config.profiles()) {
+            if (names.length() > 0) {
+                names.append(", ");
+            }
+            names.append('"').append(profile.matchName).append('"');
+        }
+        return names.toString();
+    }
+
+    private static String profileNames(Config config) {
+        StringBuilder names = new StringBuilder();
+        for (Config.Profile profile : config.profiles()) {
+            if (names.length() > 0) {
+                names.append(", ");
+            }
+            names.append(profile.name);
+        }
+        return names.toString();
     }
 }

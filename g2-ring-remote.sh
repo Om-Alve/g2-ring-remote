@@ -6,7 +6,7 @@
 #   ./g2-ring-remote.sh deepgram-key FILE  copy a Deepgram API key for speech-to-text (or - for stdin)
 #   ./g2-ring-remote.sh start|stop|restart|status
 #   ./g2-ring-remote.sh logs [-f]
-#   ./g2-ring-remote.sh simulate EVENT     e.g. touch.tap, key.PLAYPAUSE (tests Faceclaw delivery)
+#   ./g2-ring-remote.sh simulate [PROFILE] EVENT   e.g. touch.tap, watch key.MUTE (tests delivery)
 #   ./g2-ring-remote.sh push-config FILE   replace the phone's config (then restart)
 set -euo pipefail
 
@@ -79,7 +79,7 @@ case "$cmd" in
   stop) phone "sh $dir/stop.sh" ;;
   restart) phone "sh $dir/stop.sh; sleep 1; sh $dir/start.sh" ;;
   status) control status ;;
-  simulate) control simulate "${1:?usage: g2-ring-remote.sh simulate EVENT}" ;;
+  simulate) control simulate "$@" ;;
   logs)
     if [[ "${1:-}" == -f ]]; then adb shell "tail -n 50 -f $dir/g2-ring-remote.log"; else phone "cat $dir/g2-ring-remote.log"; fi
     ;;
