@@ -9,39 +9,45 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.BlockingQueue;
+import java.util.ArrayDeque;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
  * Faceclaw's local input API: one newline-terminated JSON request per TCP
- * connection, one JSON reply. Gestures go through a small bounded queue on one
- * thread, in order. Nothing is ever retried: a request that timed out may
- * already have reached the glasses, and a replay could double-tap the UI.
+ * connection, one JSON reply. Gestures and typed text go through a small bounded
+ * queue on one thread, in order. Nothing is ever retried: a request that timed out
+ * may already have reached the glasses, and a replay could double-tap the UI.
  */
 final class FaceclawSender implements Router.GestureSink {
     static final int TIMEOUT_MS = 5000;
+    /** Faceclaw's per-request limit for typed text. */
+    private static final int MAX_TEXT = 64;
+    private static final int QUEUE_CAPACITY = 4;
     private static final int MAX_REPLY = 64 * 1024;
     private static final Pattern OK = Pattern.compile("\"ok\"\\s*:\\s*true");
     private static final Pattern ERROR = Pattern.compile("\"error\"\\s*:\\s*\"([^\"]*)\"");
     private static final Pattern MESSAGE = Pattern.compile("\"message\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
 
     private final Config config;
-    private final BlockingQueue<Request> queue = new ArrayBlockingQueue<>(4);
+    private final ArrayDeque<Request> queue = new ArrayDeque<>();
+    private final Object queueLock = new Object();
     private final Object statsLock = new Object();
     private int delivered;
     private int failed;
     private int dropped;
     private String lastResult = "nothing sent yet";
 
+    /** A gesture request, or a text request whose characters may still be growing. */
     private static final class Request {
         final String gesture;
         final String source;
+        final StringBuilder text;
 
-        Request(String gesture, String source) {
+        Request(String gesture, String source, StringBuilder text) {
             this.gesture = gesture;
             this.source = source;
+            this.text = text;
         }
     }
 
@@ -57,24 +63,66 @@ final class FaceclawSender implements Router.GestureSink {
 
     @Override
     public void deliver(String event, String gesture, String source) {
-        if (!queue.offer(new Request(gesture, source))) {
-            synchronized (statsLock) {
-                dropped++;
+        synchronized (queueLock) {
+            if (queue.size() == QUEUE_CAPACITY) {
+                countDropped(1);
+                Log.i("dropped " + gesture + ": Faceclaw is not keeping up");
+                return;
             }
-            Log.i("dropped " + gesture + ": Faceclaw is not keeping up");
+            queue.addLast(new Request(gesture, source, null));
+            queueLock.notifyAll();
         }
+    }
+
+    @Override
+    public void type(String text) {
+        synchronized (queueLock) {
+            Request tail = queue.peekLast();
+            if (tail != null && tail.text != null && tail.text.length() + text.length() <= MAX_TEXT) {
+                tail.text.append(text);
+                return;
+            }
+            if (queue.size() == QUEUE_CAPACITY) {
+                countDropped(text.length());
+                Log.i("dropped " + text.length() + " typed characters: Faceclaw is not keeping up");
+                return;
+            }
+            queue.addLast(new Request(null, null, new StringBuilder(text)));
+            queueLock.notifyAll();
+        }
+    }
+
+    private void countDropped(int count) {
+        synchronized (statsLock) {
+            dropped += count;
+        }
+    }
+
+    private static String textLabel(int count) {
+        return count + (count == 1 ? " typed character" : " typed characters");
     }
 
     /** Validates the token without sending input. Returns a one-line result. */
     String ping() {
         try {
             String token = readToken();
-            String reply = request("{\"version\":1,\"token\":\"" + escape(token)
-                    + "\",\"action\":\"ping\",\"permission\":\"input\"}");
-            return describe(reply);
+            String result = describe(request(pingRequest(token, "input")));
+            if (config.typesText()) {
+                try {
+                    result += ", text " + describe(request(pingRequest(token, "text")));
+                } catch (IOException e) {
+                    result += ", text failed: " + e.getMessage();
+                }
+            }
+            return result;
         } catch (IOException e) {
             return "failed: " + e.getMessage();
         }
+    }
+
+    private static String pingRequest(String token, String permission) {
+        return "{\"version\":1,\"token\":\"" + escape(token) + "\",\"action\":\"ping\",\"permission\":\""
+                + permission + "\"}";
     }
 
     String stats() {
@@ -87,18 +135,31 @@ final class FaceclawSender implements Router.GestureSink {
     private void drain() {
         while (true) {
             Request item;
-            try {
-                item = queue.take();
-            } catch (InterruptedException e) {
-                return;
+            synchronized (queueLock) {
+                while (queue.isEmpty()) {
+                    try {
+                        queueLock.wait();
+                    } catch (InterruptedException e) {
+                        return;
+                    }
+                }
+                item = queue.removeFirst();
             }
+            String what = item.text != null ? textLabel(item.text.length()) : item.gesture;
             String result;
             boolean ok = false;
             try {
                 String token = readToken();
-                String reply = request("{\"version\":1,\"token\":\"" + escape(token)
-                        + "\",\"action\":\"input\",\"gesture\":\"" + item.gesture
-                        + "\",\"source\":\"" + item.source + "\"}");
+                String json;
+                if (item.text != null) {
+                    json = "{\"version\":1,\"token\":\"" + escape(token)
+                            + "\",\"action\":\"type\",\"text\":\"" + escape(item.text.toString()) + "\"}";
+                } else {
+                    json = "{\"version\":1,\"token\":\"" + escape(token)
+                            + "\",\"action\":\"input\",\"gesture\":\"" + item.gesture
+                            + "\",\"source\":\"" + item.source + "\"}";
+                }
+                String reply = request(json);
                 ok = OK.matcher(reply).find();
                 result = describe(reply);
             } catch (IOException e) {
@@ -110,9 +171,9 @@ final class FaceclawSender implements Router.GestureSink {
                 } else {
                     failed++;
                 }
-                lastResult = item.gesture + " " + result;
+                lastResult = what + " " + result;
             }
-            Log.i("faceclaw " + item.gesture + ": " + result);
+            Log.i("faceclaw " + what + ": " + result);
         }
     }
 
@@ -176,6 +237,8 @@ final class FaceclawSender implements Router.GestureSink {
             char c = s.charAt(i);
             if (c == '"' || c == '\\') {
                 out.append('\\').append(c);
+            } else if (c == '\b') {
+                out.append("\\b");
             } else if (c < 0x20) {
                 out.append(String.format("\\u%04x", (int) c));
             } else {

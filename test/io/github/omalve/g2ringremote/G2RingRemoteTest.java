@@ -46,11 +46,20 @@ public final class G2RingRemoteTest {
         routesEachNodeThroughItsProfile();
         repeatFilteringIsPerProfile();
         watchChordsBecomeSwipes();
+        watchTextChordsType();
+        watchTextChordsSurviveKernelSplitFrames();
+        watchTextChordsBypassTheRepeatFilter();
+        invalidTextChordsAreDropped();
+        textDisabledKeepsGestureBehaviour();
+        textSettingParsesAndValidates();
         passthroughParsingAndInjection();
         passthroughRepeatsAreDropped();
         simulateAcceptsProfileQualifiedEvents();
         keyNames();
         senderSendsOneRequestAndParsesReplies();
+        senderPingsForTextPermission();
+        senderTypesExactJson();
+        senderCoalescesQueuedText();
         senderNeverRetries();
         senderWithoutTokenDoesNotConnect();
         System.out.println("g2-ring-remote: " + passed + " checks passed");
@@ -143,11 +152,17 @@ public final class G2RingRemoteTest {
     private static final class Recorder implements Router.GestureSink {
         final List<String> gestures = new ArrayList<>();
         final List<String> sources = new ArrayList<>();
+        final List<String> texts = new ArrayList<>();
 
         @Override
         public void deliver(String event, String gesture, String source) {
             gestures.add(gesture);
             sources.add(source);
+        }
+
+        @Override
+        public void type(String text) {
+            texts.add(text);
         }
     }
 
@@ -419,8 +434,196 @@ public final class G2RingRemoteTest {
         equal(1, plain.gestures.size(), "no chords: immediate");
     }
 
-    private static void repeatFilteringIsPerProfile() {
-        Config c = twoRemotes();
+    /** The watch's report-2 consumer bits 0..7, as the kernel emits them. */
+    private static final int[] WATCH_BITS = {114, 115, 113, 164, 165, 163, 0x195, 168};
+
+    private static Config textWatch() {
+        return Config.parse(Arrays.asList(
+                "device.watch.match.name=" + WATCH_NAME,
+                "device.watch.key.repeat-window-ms=150",
+                "device.watch.text.enabled=true",
+                "device.watch.map.key.VOLUMEUP=scroll-up",
+                "device.watch.map.key.CODE_0x195=scroll-down",
+                "device.watch.map.key.PLAYPAUSE=click",
+                "device.watch.map.key.CODE_0xa8=double-click",
+                "device.watch.map.key.CODE_0x195+VOLUMEUP=swipe-up",
+                "device.watch.map.key.CODE_0x195+MUTE=swipe-down",
+                "device.watch.map.key.CODE_0x195+PREVIOUSSONG=swipe-left",
+                "device.watch.map.key.CODE_0x195+NEXTSONG=swipe-right"));
+    }
+
+    /** One HID report: EV_KEY down per set bit, SYN, then the same bits released. */
+    private static void watchReport(Router router, Config.Profile profile, int report, long t) {
+        for (int value = 1; value >= 0; value--) {
+            for (int bit = 0; bit < 8; bit++) {
+                if ((report & (1 << bit)) != 0) {
+                    router.onEvent("/watch", profile, 1, WATCH_BITS[bit], value, t);
+                }
+            }
+            router.onEvent("/watch", profile, 0, 0, 0, t);
+        }
+    }
+
+    /**
+     * One watch report as the phone's kernel delivers it: hid-input sends MSC_SCAN before each
+     * key, and the input core flushes a SYN_REPORT whenever its small per-device buffer fills
+     * (every 4 keys here), so a 5+ key report reaches userspace split across frames.
+     */
+    private static void watchReportSplit(Router router, Config.Profile profile, int report, long t) {
+        for (int value = 1; value >= 0; value--) {
+            int inFrame = 0;
+            for (int bit = 0; bit < 8; bit++) {
+                if ((report & (1 << bit)) != 0) {
+                    router.onEvent("/watch", profile, 4, 4, 0xc0000 + bit, t);
+                    router.onEvent("/watch", profile, 1, WATCH_BITS[bit], value, t);
+                    if (++inFrame == 4) {
+                        router.onEvent("/watch", profile, 0, 0, 0, t);
+                        inFrame = 0;
+                    }
+                }
+            }
+            if (inFrame > 0) {
+                router.onEvent("/watch", profile, 0, 0, 0, t);
+            }
+        }
+    }
+
+    private static void watchTextChordsSurviveKernelSplitFrames() {
+        Config c = textWatch();
+        Config.Profile watch = c.profile("watch");
+        Recorder r = new Recorder();
+        Router router = new Router(c, r);
+        StringBuilder want = new StringBuilder();
+        long t = 0;
+        for (int ch = 0x20; ch <= 0x7e; ch++) {
+            watchReportSplit(router, watch, 0x80 | ch, t);
+            want.append((char) ch);
+            t += 1000;
+        }
+        watchReportSplit(router, watch, 0x80 | 0x08, t);
+        want.append('\b');
+        equal(want.toString(), String.join("", r.texts), "every character survives split frames ('o' = 7 keys)");
+        equal(0, r.gestures.size(), "split text chords never become gestures");
+
+        Recorder g = new Recorder();
+        Router gestures = new Router(c, g);
+        int[] reports = {0x80, 0x02, 0x40, 0x08, 0x42, 0x44, 0x50, 0x60};
+        t = 0;
+        for (int report : reports) {
+            watchReportSplit(gestures, watch, report, t);
+            t += 1000;
+        }
+        equal(Arrays.asList("double-click", "scroll-up", "scroll-down", "click",
+                "swipe-up", "swipe-down", "swipe-left", "swipe-right"), g.gestures,
+                "gestures are unchanged with kernel framing");
+    }
+
+    private static void watchTextChordsType() {
+        Config c = textWatch();
+        Config.Profile watch = c.profile("watch");
+        Recorder r = new Recorder();
+        Router router = new Router(c, r);
+        long t = 0;
+        for (int ch = 0x08; ch <= 0x7e; ch++) {
+            if (ch > 0x08 && ch < 0x20) {
+                continue;
+            }
+            int before = r.texts.size();
+            watchReport(router, watch, 0x80 | ch, t);
+            equal(before + 1, r.texts.size(), "one keystroke for 0x" + Integer.toHexString(ch));
+            equal(String.valueOf((char) ch), r.texts.get(before),
+                    "character for 0x" + Integer.toHexString(ch));
+            t += 1000;
+        }
+        equal(0, r.gestures.size(), "text chords never become gestures");
+
+        // REWIND alone and the existing swipes still work with text enabled.
+        Recorder g = new Recorder();
+        Router gestures = new Router(c, g);
+        int[] reports = {0x80, 0x02, 0x40, 0x08, 0x42, 0x44, 0x50, 0x60};
+        t = 0;
+        for (int report : reports) {
+            watchReport(gestures, watch, report, t);
+            t += 1000;
+        }
+        equal(Arrays.asList("double-click", "scroll-up", "scroll-down", "click",
+                "swipe-up", "swipe-down", "swipe-left", "swipe-right"), g.gestures,
+                "REWIND alone and the swipe chords are unchanged");
+        equal(0, g.texts.size(), "gestures send no text");
+    }
+
+    private static void watchTextChordsBypassTheRepeatFilter() {
+        Config c = textWatch();
+        Config.Profile watch = c.profile("watch");
+        Recorder r = new Recorder();
+        Router router = new Router(c, r);
+        watchReport(router, watch, 0x80 | 'l', 0);
+        watchReport(router, watch, 0x80 | 'l', 50); // inside the 150 ms repeat window
+        watchReport(router, watch, 0x80 | 'l', 50); // identical timestamp
+        equal(Arrays.asList("l", "l", "l"), r.texts, "three identical letters are not filtered");
+        equal(0, r.gestures.size(), "no gesture alongside the text");
+    }
+
+    private static void invalidTextChordsAreDropped() {
+        Config c = textWatch();
+        Config.Profile watch = c.profile("watch");
+        Recorder r = new Recorder();
+        Router router = new Router(c, r);
+        for (int ch : new int[] {0x0a, 0x7f, 0x01}) {
+            watchReport(router, watch, 0x80 | ch, 0);
+        }
+        // REWIND plus a key outside the report-2 table is not a text chord either.
+        router.onEvent("/watch", watch, 1, 168, 1, 0);
+        router.onEvent("/watch", watch, 1, 116, 1, 0);
+        router.onEvent("/watch", watch, 0, 0, 0, 0);
+        equal(0, r.texts.size(), "invalid chords type nothing");
+        equal(0, r.gestures.size(), "invalid chords are never gestures");
+    }
+
+    private static void textDisabledKeepsGestureBehaviour() {
+        // The ring profile has no chords and no text: keys dispatch one by one, as before.
+        Recorder ring = new Recorder();
+        Router router = new Router(new Config(), ring);
+        router.onEvent("/ring", 1, 168, 1, 0);
+        router.onEvent("/ring", 1, 115, 1, 0);
+        equal(Collections.singletonList("voice-toggle"), ring.gestures,
+                "text off: REWIND+VOLUMEUP still dispatches per key");
+        equal(0, ring.texts.size(), "text off: nothing typed");
+
+        // The watch chord profile without text looks the pair up as a chord, as before.
+        Config c = Config.parse(Arrays.asList(
+                "device.watch.match.name=" + WATCH_NAME,
+                "device.watch.map.key.CODE_0xa8=double-click",
+                "device.watch.map.key.CODE_0xa8+VOLUMEUP=swipe-up"));
+        Config.Profile watch = c.profile("watch");
+        Recorder r = new Recorder();
+        Router chords = new Router(c, r);
+        watchReport(chords, watch, 0x80, 0);
+        watchReport(chords, watch, 0x80 | 0x02, 1000);
+        equal(Arrays.asList("double-click", "swipe-up"), r.gestures,
+                "text off: REWIND alone and REWIND+VOLUMEUP keep their chord mappings");
+        equal(0, r.texts.size(), "text off: REWIND+key is not typed");
+    }
+
+    private static void textSettingParsesAndValidates() {
+        Config off = new Config();
+        check(!off.defaultProfile().textChords, "text is off by default");
+        check(!off.typesText(), "no profile types by default");
+        Config c = Config.parse(Arrays.asList(
+                "device.watch.match.name=" + WATCH_NAME,
+                "device.watch.text.enabled=true"));
+        check(c.profile("watch").textChords, "device.watch.text.enabled");
+        check(c.typesText(), "typesText sees the watch profile");
+        check(!c.defaultProfile().textChords, "the ring profile stays off");
+        Config inherited = Config.parse(Arrays.asList(
+                "text.enabled=true",
+                "device.watch.match.name=" + WATCH_NAME));
+        check(inherited.profile("watch").textChords, "a device profile inherits text.enabled");
+        rejects("text.enabled=yes", "text.enabled boolean");
+        rejects("device.watch.text.enabled=1", "device text.enabled boolean");
+    }
+
+    private static void repeatFilteringIsPerProfile() {        Config c = twoRemotes();
         Recorder r = new Recorder();
         Router router = new Router(c, r);
         Config.Profile ring = c.defaultProfile();
@@ -556,8 +759,123 @@ public final class G2RingRemoteTest {
         check(requests.get(2).contains("\"gesture\":\"swipe-left\""), "second gesture in order");
     }
 
-    private static void senderNeverRetries() throws Exception {
-        final AtomicInteger connections = new AtomicInteger();
+    private static void senderPingsForTextPermission() throws Exception {
+        final List<String> requests = Collections.synchronizedList(new ArrayList<String>());
+        try (ServerSocket server = new ServerSocket(0)) {
+            Thread fake = new Thread(() -> {
+                for (int i = 0; i < 2; i++) {
+                    try (Socket s = server.accept()) {
+                        BufferedReader in = new BufferedReader(
+                                new InputStreamReader(s.getInputStream(), StandardCharsets.UTF_8));
+                        requests.add(in.readLine());
+                        OutputStream out = s.getOutputStream();
+                        out.write((i == 0 ? "{\"ok\":true}\n" : "{\"ok\":false,\"error\":\"forbidden\"}\n")
+                                .getBytes(StandardCharsets.UTF_8));
+                        out.flush();
+                    } catch (Exception e) {
+                        return;
+                    }
+                }
+            });
+            fake.start();
+            Config c = senderConfig(server.getLocalPort(), "fc1_t");
+            c.defaultProfile().textChords = true;
+            FaceclawSender sender = new FaceclawSender(c);
+            equal("ok, text forbidden", sender.ping(), "both permissions reported");
+            fake.join(5000);
+        }
+        equal("{\"version\":1,\"token\":\"fc1_t\",\"action\":\"ping\",\"permission\":\"input\"}",
+                requests.get(0), "input ping");
+        equal("{\"version\":1,\"token\":\"fc1_t\",\"action\":\"ping\",\"permission\":\"text\"}",
+                requests.get(1), "text ping");
+    }
+
+    private static void senderTypesExactJson() throws Exception {
+        final List<String> requests = Collections.synchronizedList(new ArrayList<String>());
+        try (ServerSocket server = new ServerSocket(0)) {
+            Thread fake = new Thread(() -> {
+                for (int i = 0; i < 4; i++) {
+                    try (Socket s = server.accept()) {
+                        BufferedReader in = new BufferedReader(
+                                new InputStreamReader(s.getInputStream(), StandardCharsets.UTF_8));
+                        requests.add(in.readLine());
+                        OutputStream out = s.getOutputStream();
+                        out.write("{\"ok\":true}\n".getBytes(StandardCharsets.UTF_8));
+                        out.flush();
+                    } catch (Exception e) {
+                        return;
+                    }
+                }
+            });
+            fake.start();
+            FaceclawSender sender = new FaceclawSender(senderConfig(server.getLocalPort(), "fc1_t"));
+            sender.start();
+            String[] chars = {"a", "\b", "\"", "\\"};
+            for (int i = 0; i < chars.length; i++) {
+                final int n = i + 1;
+                sender.type(chars[i]);
+                waitFor(() -> sender.stats().startsWith("delivered " + n + ","), "type " + n + " sent");
+            }
+            fake.join(5000);
+        }
+        equal("{\"version\":1,\"token\":\"fc1_t\",\"action\":\"type\",\"text\":\"a\"}",
+                requests.get(0), "type a");
+        equal("{\"version\":1,\"token\":\"fc1_t\",\"action\":\"type\",\"text\":\"\\b\"}",
+                requests.get(1), "type backspace");
+        equal("{\"version\":1,\"token\":\"fc1_t\",\"action\":\"type\",\"text\":\"\\\"\"}",
+                requests.get(2), "type quote");
+        equal("{\"version\":1,\"token\":\"fc1_t\",\"action\":\"type\",\"text\":\"\\\\\"}",
+                requests.get(3), "type backslash");
+    }
+
+    private static void senderCoalescesQueuedText() throws Exception {
+        final List<String> requests = Collections.synchronizedList(new ArrayList<String>());
+        final StringBuilder typed = new StringBuilder();
+        final Thread fake;
+        try (ServerSocket server = new ServerSocket(0)) {
+            fake = new Thread(() -> {
+                while (true) {
+                    try (Socket s = server.accept()) {
+                        BufferedReader in = new BufferedReader(
+                                new InputStreamReader(s.getInputStream(), StandardCharsets.UTF_8));
+                        requests.add(in.readLine());
+                        OutputStream out = s.getOutputStream();
+                        out.write("{\"ok\":true}\n".getBytes(StandardCharsets.UTF_8));
+                        out.flush();
+                    } catch (Exception e) {
+                        return;
+                    }
+                }
+            });
+            fake.start();
+            FaceclawSender sender = new FaceclawSender(senderConfig(server.getLocalPort(), "fc1_t"));
+            for (int i = 0; i < 100; i++) {
+                String ch = String.valueOf((char) ('a' + i % 26));
+                typed.append(ch);
+                sender.type(ch);
+                if (i == 69) {
+                    sender.deliver("touch.tap", "click", "watch");
+                }
+            }
+            sender.start();
+            waitFor(() -> sender.stats().startsWith("delivered 4,"), "all requests sent");
+            equal("delivered 4, failed 0, dropped 0; last: 30 typed characters ok",
+                    sender.stats(), "nothing dropped, in order");
+        }
+        fake.join(5000);
+        equal(4, requests.size(), "64 + 6 characters, the gesture, then 30 more");
+        equal(typed.substring(0, 64), typedText(requests.get(0)), "the first request fills the cap");
+        equal(typed.substring(64, 70), typedText(requests.get(1)), "the rest before the gesture");
+        check(requests.get(2).contains("\"gesture\":\"click\""), "the gesture keeps its place");
+        equal(typed.substring(70), typedText(requests.get(3)), "text after the gesture");
+    }
+
+    private static String typedText(String request) {
+        int start = request.indexOf("\"text\":\"") + 8;
+        return request.substring(start, request.length() - 2);
+    }
+
+    private static void senderNeverRetries() throws Exception {        final AtomicInteger connections = new AtomicInteger();
         try (ServerSocket server = new ServerSocket(0)) {
             Thread fake = new Thread(() -> {
                 try (Socket s = server.accept()) {

@@ -18,6 +18,8 @@ import java.util.concurrent.TimeUnit;
 final class Router {
     interface GestureSink {
         void deliver(String event, String gesture, String source);
+
+        void type(String text);
     }
 
     /** Runs {@code input keyevent}; injectable so tests never spawn a process. */
@@ -27,13 +29,21 @@ final class Router {
 
     private static final int INJECT_TIMEOUT_SECONDS = 5;
 
+    /** The watch's report-2 consumer bits 0..7 as Linux key codes (hid-input.c). */
+    private static final int[] HID_ASCII_BITS = {114, 115, 113, 164, 165, 163, 0x195, 168};
+    private static final int REWIND = 168;
+    private static final int BACKSPACE = 0x08;
+    private static final int LAST_PRINTABLE = 0x7e;
+
     private final Config config;
     private final GestureSink sink;
     private final CommandRunner commands;
     private final Map<String, Map<String, TouchDecoder>> decoders = new HashMap<>();
     private final Map<String, Long> lastKeyDown = new HashMap<>();
-    /** Key downs of the current report, per profile/node, for profiles that map key chords. */
+    /** Key downs of the current chord, per profile/node, for profiles that read chords. */
     private final Map<String, List<Integer>> pendingKeys = new HashMap<>();
+    /** Keys of the current chord still held, per profile/node. */
+    private final Map<String, Integer> heldKeys = new HashMap<>();
     private ExecutorService androidKeys;
     private String lastEvent = "none";
 
@@ -53,26 +63,52 @@ final class Router {
     }
 
     synchronized void onEvent(String node, Config.Profile profile, int type, int code, int value, long nowMs) {
+        boolean chords = hasChords(profile) || profile.textChords;
+        String slot = profile.name + "/" + node;
         if (type == TouchDecoder.EV_KEY && KeyNames.isKey(code)) {
+            if (chords && value == 0) {
+                Integer held = heldKeys.get(slot);
+                if (held != null && held > 0) {
+                    heldKeys.put(slot, held - 1);
+                }
+            }
             if (value == 1) {
-                if (hasChords(profile)) {
-                    String slot = profile.name + "/" + node;
+                if (chords) {
                     List<Integer> keys = pendingKeys.get(slot);
                     if (keys == null) {
                         keys = new ArrayList<>();
                         pendingKeys.put(slot, keys);
                     }
                     keys.add(code);
+                    Integer held = heldKeys.get(slot);
+                    heldKeys.put(slot, held == null ? 1 : held + 1);
                 } else {
                     onKeyDown(node, profile, "key." + KeyNames.name(code), nowMs);
                 }
             }
             return; // key up (0) and kernel auto-repeat (2) carry no gesture
         }
-        if (type == TouchDecoder.EV_SYN && code == TouchDecoder.SYN_REPORT) {
-            List<Integer> keys = pendingKeys.remove(profile.name + "/" + node);
+        // The kernel flushes a SYN_REPORT whenever its per-device buffer fills (about four
+        // keys with their MSC_SCAN events), so one watch report can span several frames.
+        // A chord ends once all its keys are up: the watch releases every key in one report.
+        Integer held = heldKeys.get(slot);
+        if (type == TouchDecoder.EV_SYN && code == TouchDecoder.SYN_REPORT && (held == null || held == 0)) {
+            heldKeys.remove(slot);
+            List<Integer> keys = pendingKeys.remove(slot);
             if (keys != null && !keys.isEmpty()) {
-                onKeyDown(node, profile, chordName(keys), nowMs);
+                if (profile.textChords && isTextChord(keys)) {
+                    int c = textChar(keys);
+                    if (c < 0) {
+                        lastEvent = label(profile) + "text chord (not an ASCII key)";
+                        Log.i(label(profile) + "text chord dropped: not an ASCII key");
+                    } else {
+                        lastEvent = label(profile) + "text (1 character)";
+                        Log.i(label(profile) + "text: 1 character");
+                        sink.type(String.valueOf((char) c));
+                    }
+                } else {
+                    onKeyDown(node, profile, chordName(keys), nowMs);
+                }
             }
         }
         Map<String, TouchDecoder> byNode = decoders.get(profile.name);
@@ -93,6 +129,8 @@ final class Router {
 
     /** Forgets per-node touch state when a node goes away. */
     synchronized void forget(String node) {
+        pendingKeys.keySet().removeIf(slot -> slot.endsWith("/" + node));
+        heldKeys.keySet().removeIf(slot -> slot.endsWith("/" + node));
         for (Map<String, TouchDecoder> byNode : decoders.values()) {
             byNode.remove(node);
         }
@@ -113,7 +151,8 @@ final class Router {
 
     /**
      * A profile that maps a chord (key.A+B) reads keys per report: keys pressed in the same
-     * report form one event. The CMF watch sends a swipe as two keys in one report.
+     * report form one event. The CMF watch sends a swipe as two keys in one report, and its
+     * text chords are one report too.
      */
     private static boolean hasChords(Config.Profile profile) {
         for (String event : profile.map.keySet()) {
@@ -122,6 +161,39 @@ final class Router {
             }
         }
         return false;
+    }
+
+    /** REWIND plus at least one other key: a text chord, valid or not. */
+    private static boolean isTextChord(List<Integer> codes) {
+        boolean rewind = false;
+        boolean other = false;
+        for (int code : codes) {
+            if (code == REWIND) {
+                rewind = true;
+            } else {
+                other = true;
+            }
+        }
+        return rewind && other;
+    }
+
+    /** The ASCII character a text chord carries, or -1 when its bits are not one such byte. */
+    private static int textChar(List<Integer> codes) {
+        int bits = 0;
+        for (int code : codes) {
+            int bit = -1;
+            for (int i = 0; i < HID_ASCII_BITS.length; i++) {
+                if (HID_ASCII_BITS[i] == code) {
+                    bit = i;
+                }
+            }
+            if (bit < 0) {
+                return -1;
+            }
+            bits |= 1 << bit;
+        }
+        int c = bits & 0x7f;
+        return c == BACKSPACE || (c >= 0x20 && c <= LAST_PRINTABLE) ? c : -1;
     }
 
     /** key.NAME for one key, key.A+B (names sorted) for keys pressed together. */

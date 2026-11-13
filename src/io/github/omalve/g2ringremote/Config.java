@@ -34,6 +34,8 @@ final class Config {
         String source = "watch";
         int tapThreshold = 100;
         long repeatWindowMs = 600;
+        /** Decodes the watch's REWIND+bit reports as typed ASCII characters. */
+        boolean textChords;
         /** Event name (touch.up, key.PLAYPAUSE, ...) to gesture, "none" or "android:KEYCODE_...". */
         final Map<String, String> map = new LinkedHashMap<>();
 
@@ -148,6 +150,7 @@ final class Config {
             p.source = c.defaultProfile.source;
             p.tapThreshold = c.defaultProfile.tapThreshold;
             p.repeatWindowMs = c.defaultProfile.repeatWindowMs;
+            p.textChords = c.defaultProfile.textChords;
             for (String[] setting : entry.getValue()) {
                 try {
                     c.set(p, setting[0], setting[1]);
@@ -172,6 +175,16 @@ final class Config {
 
     Profile profile(String name) {
         return profiles.get(name);
+    }
+
+    /** True when any profile types, so the Faceclaw token needs the text permission too. */
+    boolean typesText() {
+        for (Profile p : profiles.values()) {
+            if (p.textChords) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Profiles that match a node, in definition order; the first one grabs it. */
@@ -223,6 +236,12 @@ final class Config {
                 return;
             case "key.repeat-window-ms":
                 profile.repeatWindowMs = parseInt(key, value, 0, 60000);
+                return;
+            case "text.enabled":
+                if (!value.equals("true") && !value.equals("false")) {
+                    throw new IllegalArgumentException("text.enabled is true or false");
+                }
+                profile.textChords = value.equals("true");
                 return;
             default:
                 if (profile != defaultProfile) {

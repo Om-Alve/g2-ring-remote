@@ -102,6 +102,31 @@ ring's 600 ms. The camera shutter is re-injected into Android with `input keyeve
 the phone's camera app still takes the photo while the watch is grabbed. See the
 commented example block in `g2-ring-remote.conf`.
 
+#### Typing on the watch
+
+Set `device.watch.text.enabled=true` to turn the watch's on-watch keyboard into typed
+text. Each keystroke arrives as `KEY_REWIND` plus the bits of one ASCII byte, so the
+report is `0x80 | c`:
+
+| Report | Character |
+| --- | --- |
+| `0x88` | backspace |
+| `0xa0` | space |
+| `0xb0`..`0xb9` | `0`..`9` |
+| `0xc1`..`0xda` | `A`..`Z` |
+| `0xe1`..`0xfa` | `a`..`z` |
+
+`KEY_REWIND` alone is still `double-click`. A report with `KEY_REWIND` plus any other
+key is sent to Faceclaw as text and never as a gesture, and it is not repeat-filtered,
+so two of the same character both arrive. Text goes through the same ordered queue as
+gestures; consecutive keystrokes are merged into one request of at most 64 characters.
+A rejected or failed request is logged with the error and the character count, never
+the text.
+
+The Faceclaw token needs the **Text to foreground window** permission as well as
+**Provide input**. When any profile types, `status` pings for both permissions and
+shows each result.
+
 ## Install and run
 
 From this directory, with the phone connected over adb:
@@ -126,9 +151,10 @@ from a computer.
 ### Faceclaw input token
 
 In Faceclaw on the glasses, go to **Settings → API Keys → Input tokens → Create
-token**. Give it the **Provide input** permission only, then use **Copy token to phone
-clipboard**. Save it with `./g2-ring-remote.sh token -` (paste, then Ctrl-D), or with the
-launcher app's **Paste** and **Save token** buttons.
+token**. Give it the **Provide input** permission, plus **Text to foreground window**
+if a profile types on the watch. Then use **Copy token to phone clipboard**. Save it
+with `./g2-ring-remote.sh token -` (paste, then Ctrl-D), or with the launcher app's
+**Paste** and **Save token** buttons.
 
 The token is stored at `/data/local/tmp/g2-ring-remote/token` with mode 600, so only the
 shell user can read it. It is sent only to Faceclaw on localhost and is never logged.
@@ -213,10 +239,10 @@ server key**. Set `stt.enabled=false` to turn the proxy off.
 
 The top-level settings are the default device profile (the K02). `device.<name>.SETTING`
 adds another profile: `match.name`, `match.uniq`, `faceclaw.source`,
-`touch.tap-threshold`, `key.repeat-window-ms` and `map.*` can all be set per device. A
-profile's map starts empty, so it does not inherit the ring's map; every other setting
-falls back to the top-level value. A node is grabbed by the first profile that matches
-it. Profile names are one word.
+`touch.tap-threshold`, `key.repeat-window-ms`, `text.enabled` and `map.*` can all be
+set per device. A profile's map starts empty, so it does not inherit the ring's map;
+every other setting falls back to the top-level value. A node is grabbed by the first
+profile that matches it. Profile names are one word.
 
 A map value of `android:KEYCODE_NAME` re-injects that key into Android with
 `input keyevent` instead of sending a Faceclaw gesture. For example,
